@@ -1,198 +1,191 @@
 // jevry reads input from the files named in argv, or from stdin when argv is
 // empty (like Ruby's ARGF.read), and sends it to a decision model. The
-// --provider flag selects the API: typesafe (Jev, the default) or openai
-// (the Decisions API).
+// --provider flag selects the API: typesafe (Jev, the default), openai (the
+// Decisions API) or ollama (a local model).
 //
 // Without --question, the input is a full request body for the provider. The
 // program prints the raw response.
 //
-// With --question, the input is the state. The question type depends on the
-// other flags:
+// With --question, the input is the state. PNG and JPEG inputs are images. All
+// other input is text. The question type depends on the other flags:
 //   - no other flags: yes/no. Prints the probability of yes.
 //   - --choice (repeatable): choice. Prints the chosen option.
 //   - --level (repeatable): score. Prints the score, from 0 to len(levels)-1.
+//   - --box: box. Prints the edges of the box around the target in the image.
 package main
 
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 )
 
-// question is one question in a provider-neutral form. With no choices and no
-// levels, it is a yes/no question.
+// input is the content that the questions refer to.
+type input struct {
+	text   string
+	images []image
+}
+
+// image is one PNG or JPEG file. Format is "png" or "jpg".
+type image struct {
+	data   []byte
+	format string
+}
+
+// question is one question in a provider-neutral form. With no choices, no
+// levels and no box, it is a yes/no question.
 type question struct {
 	text    string
 	choices []option
 	levels  []string
+	box     bool
 }
 
 type option struct{ name, desc string }
 
-// answer is the parsed answer to a question. Type is "noul", "choice" or
-// "score". Noul is the probability of yes.
+// answer is the parsed answer to a question. Type is "noul", "choice", "score"
+// or "box". Noul is the probability of yes.
 type answer struct {
 	Type   string
 	Noul   float64
 	Choice any
 	Score  float64
+	Box    box
 }
 
+// box holds the edges of a box as fractions of the image size, measured from
+// the top left corner.
+type box struct{ Top, Bottom, Left, Right float64 }
+
+// provider describes one API.
 type provider struct {
-	url, keyEnv, model string
-	request            func(state string, q question) map[string]any
-	answer             func(body []byte) (answer, error)
+	// keyEnv is the environment variable with the API key. Empty means that
+	// the API needs no key.
+	keyEnv string
+	// model is the default model. Empty means that --model is necessary.
+	model string
+	url   func() string
+	// request builds the request body for one question.
+	request func(in input, q question) (map[string]any, error)
+	// answer parses the response to a request that request built.
+	answer func(body []byte, q question) (answer, error)
+	// finish completes each request, also in raw mode. It can add defaults to
+	// the body and headers to the HTTP request. It can be nil.
+	finish func(req map[string]any, h http.Header)
 }
 
 var providers = map[string]provider{
-	// https://docs.typesafe.ai/api
-	"typesafe": {
-		url:    "https://api.typesafe.ai/v1/systemone",
-		keyEnv: "TYPESAFE_API_KEY",
-		model:  "jev-latest",
-		request: func(state string, q question) map[string]any {
-			tq := map[string]any{"type": "noul", "instructions": q.text}
-			switch {
-			case q.choices != nil:
-				criteria := map[string]any{}
-				for _, o := range q.choices {
-					if o.desc != "" {
-						criteria[o.name] = o.desc
-					} else {
-						criteria[o.name] = nil
-					}
-				}
-				tq = map[string]any{"type": "choice", "instructions": q.text, "criteria": criteria}
-			case q.levels != nil:
-				tq = map[string]any{"type": "score", "instructions": q.text, "criteria": q.levels}
-			}
-			return map[string]any{"state": state, "questions": map[string]any{"q": tq}}
-		},
-		answer: func(body []byte) (answer, error) {
-			var res struct {
-				Answers struct{ Q answer } `json:"answers"`
-			}
-			err := json.Unmarshal(body, &res)
-			return res.Answers.Q, err
-		},
-	},
-	// https://developers.openai.com/api/docs/guides/decisions
-	"openai": {
-		url:    "https://api.openai.com/v1/decisions",
-		keyEnv: "OPENAI_API_KEY",
-		model:  "gpt-6-luna",
-		request: func(state string, q question) map[string]any {
-			oq := map[string]any{"type": "predicate", "name": "q", "instructions": q.text}
-			switch {
-			case q.choices != nil:
-				var choices []map[string]any
-				for _, o := range q.choices {
-					c := map[string]any{"value": o.name}
-					if o.desc != "" {
-						c["description"] = o.desc
-					}
-					choices = append(choices, c)
-				}
-				oq = map[string]any{"type": "choice", "name": "q", "instructions": q.text, "choices": choices}
-			case q.levels != nil:
-				var levels []map[string]any
-				for _, l := range q.levels {
-					levels = append(levels, map[string]any{"label": l})
-				}
-				oq = map[string]any{"type": "score", "name": "q", "instructions": q.text, "levels": levels}
-			}
-			return map[string]any{"input": state, "questions": []any{oq}}
-		},
-		answer: func(body []byte) (answer, error) {
-			var res struct {
-				Answers []struct {
-					Type        string  `json:"type"`
-					Probability float64 `json:"probability"`
-					Choice      any     `json:"choice"`
-					Score       float64 `json:"score"`
-				} `json:"answers"`
-			}
-			if err := json.Unmarshal(body, &res); err != nil {
-				return answer{}, err
-			}
-			if len(res.Answers) != 1 {
-				return answer{}, fmt.Errorf("got %d answers, want 1", len(res.Answers))
-			}
-			a := res.Answers[0]
-			switch a.Type {
-			case "refusal":
-				return answer{}, fmt.Errorf("the model refused to answer")
-			case "predicate":
-				a.Type = "noul"
-			}
-			return answer{Type: a.Type, Noul: a.Probability, Choice: a.Choice, Score: a.Score}, nil
-		},
-	},
+	"typesafe": typesafe,
+	"openai":   openai,
+	"ollama":   ollama,
 }
 
+// errUsage reports that the flag package already printed the error.
+var errUsage = errors.New("usage")
+
 func main() {
-	if err := run(); err != nil {
+	err := run(os.Args[1:], os.Stdin, os.Stdout)
+	if errors.Is(err, errUsage) {
+		os.Exit(2)
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "jevry:", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
-	providerName := flag.String("provider", "typesafe", "API to use: typesafe or openai")
-	text := flag.String("question", "", "question to ask about the input (yes/no unless --choice or --level is set)")
+func run(args []string, stdin io.Reader, stdout io.Writer) error {
+	fs := flag.NewFlagSet("jevry", flag.ContinueOnError)
+	providerName := fs.String("provider", "typesafe", "API to use: "+providerNames())
+	model := fs.String("model", "", "model to use (default: the provider default)")
 	var q question
-	flag.Func("choice", "option for a choice question, as `name` or name=description (repeatable)", func(s string) error {
+	fs.StringVar(&q.text, "question", "", "question to ask about the input (yes/no unless --choice, --level or --box is set)")
+	fs.Func("choice", "option for a choice question, as `name` or name=description (repeatable)", func(s string) error {
 		name, desc, _ := strings.Cut(s, "=")
 		q.choices = append(q.choices, option{name, desc})
 		return nil
 	})
-	flag.Func("level", "level description for a score question, lowest first (repeatable)", func(s string) error {
+	fs.Func("level", "level description for a score question, lowest first (repeatable)", func(s string) error {
 		q.levels = append(q.levels, s)
 		return nil
 	})
-	flag.Parse()
-	q.text = *text
+	fs.BoolVar(&q.box, "box", false, "ask a box question: --question names the target to find in the image")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return errUsage
+	}
 
 	p, ok := providers[*providerName]
 	if !ok {
-		return fmt.Errorf("unknown provider %q (use typesafe or openai)", *providerName)
+		return fmt.Errorf("unknown provider %q (use %s)", *providerName, providerNames())
+	}
+	types := 0
+	for _, set := range []bool{q.choices != nil, q.levels != nil, q.box} {
+		if set {
+			types++
+		}
 	}
 	switch {
-	case q.choices != nil && q.levels != nil:
-		return fmt.Errorf("--choice and --level cannot be used together")
-	case (q.choices != nil || q.levels != nil) && q.text == "":
-		return fmt.Errorf("--choice and --level need --question")
+	case types > 1:
+		return fmt.Errorf("use only one of --choice, --level and --box")
+	case types == 1 && q.text == "":
+		return fmt.Errorf("--choice, --level and --box need --question")
 	}
 
-	in, err := readARGF(flag.Args())
+	in, err := readARGF(fs.Args(), stdin)
 	if err != nil {
 		return err
 	}
 
 	var req map[string]any
-	if q.text != "" {
-		req = p.request(string(in), q)
-	} else if err := json.Unmarshal(in, &req); err != nil {
-		return fmt.Errorf("input is not a JSON object: %w", err)
+	switch {
+	case q.text != "":
+		if q.box && len(in.images) == 0 {
+			return fmt.Errorf("--box needs a PNG or JPEG image in the input")
+		}
+		if req, err = p.request(in, q); err != nil {
+			return err
+		}
+	case len(in.images) > 0:
+		return fmt.Errorf("an image in the input needs --question")
+	default:
+		if err := json.Unmarshal([]byte(in.text), &req); err != nil {
+			return fmt.Errorf("input is not a JSON object: %w", err)
+		}
 	}
-	if _, ok := req["model"]; !ok {
+	if *model != "" {
+		req["model"] = *model
+	} else if _, ok := req["model"]; !ok {
+		if p.model == "" {
+			return fmt.Errorf("provider %s has no default model: set --model", *providerName)
+		}
 		req["model"] = p.model
 	}
-	body, _ := json.Marshal(req)
 
-	key := os.Getenv(p.keyEnv)
-	if key == "" {
-		return fmt.Errorf("%s is not set", p.keyEnv)
-	}
-
-	httpReq, _ := http.NewRequest("POST", p.url, bytes.NewReader(body))
-	httpReq.Header.Set("Authorization", "Bearer "+key)
+	httpReq, _ := http.NewRequest("POST", p.url(), nil)
 	httpReq.Header.Set("Content-Type", "application/json")
+	if p.keyEnv != "" {
+		key := os.Getenv(p.keyEnv)
+		if key == "" {
+			return fmt.Errorf("%s is not set", p.keyEnv)
+		}
+		httpReq.Header.Set("Authorization", "Bearer "+key)
+	}
+	if p.finish != nil {
+		p.finish(req, httpReq.Header)
+	}
+	body, _ := json.Marshal(req)
+	httpReq.Body = io.NopCloser(bytes.NewReader(body))
+	httpReq.ContentLength = int64(len(body))
 
 	resp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
@@ -205,52 +198,71 @@ func run() error {
 		return err
 	}
 	if resp.StatusCode != http.StatusOK {
-		os.Stdout.Write(out)
-		fmt.Println()
+		fmt.Fprintf(stdout, "%s\n", out)
 		return fmt.Errorf("HTTP %s", resp.Status)
 	}
 	if q.text == "" {
-		os.Stdout.Write(out)
-		fmt.Println()
+		fmt.Fprintf(stdout, "%s\n", out)
 		return nil
 	}
 
-	a, err := p.answer(out)
+	a, err := p.answer(out, q)
 	if err != nil {
 		return err
 	}
 	switch a.Type {
 	case "noul":
-		fmt.Printf("%.2f\n", a.Noul)
+		fmt.Fprintf(stdout, "%.2f\n", a.Noul)
 	case "choice":
-		fmt.Println(a.Choice)
+		fmt.Fprintln(stdout, a.Choice)
 	case "score":
-		fmt.Printf("%.2f\n", a.Score)
+		fmt.Fprintf(stdout, "%.2f\n", a.Score)
+	case "box":
+		fmt.Fprintf(stdout, "top=%.3f bottom=%.3f left=%.3f right=%.3f\n", a.Box.Top, a.Box.Bottom, a.Box.Left, a.Box.Right)
 	default:
 		return fmt.Errorf("unexpected answer type %q", a.Type)
 	}
 	return nil
 }
 
-// readARGF concatenates the named files, or reads stdin when there are none.
-// A name of "-" also means stdin.
-func readARGF(names []string) ([]byte, error) {
-	if len(names) == 0 {
-		return io.ReadAll(os.Stdin)
+func providerNames() string {
+	var names []string
+	for name := range providers {
+		names = append(names, name)
 	}
-	var buf bytes.Buffer
+	sort.Strings(names)
+	return strings.Join(names, ", ")
+}
+
+// readARGF reads the named files, or stdin when there are none. A name of "-"
+// also means stdin. PNG and JPEG inputs become images. All other inputs are
+// text, concatenated in the given order.
+func readARGF(names []string, stdin io.Reader) (input, error) {
+	if len(names) == 0 {
+		names = []string{"-"}
+	}
+	var in input
+	var text bytes.Buffer
 	for _, name := range names {
 		var b []byte
 		var err error
 		if name == "-" {
-			b, err = io.ReadAll(os.Stdin)
+			b, err = io.ReadAll(stdin)
 		} else {
 			b, err = os.ReadFile(name)
 		}
 		if err != nil {
-			return nil, err
+			return input{}, err
 		}
-		buf.Write(b)
+		switch http.DetectContentType(b) {
+		case "image/png":
+			in.images = append(in.images, image{b, "png"})
+		case "image/jpeg":
+			in.images = append(in.images, image{b, "jpg"})
+		default:
+			text.Write(b)
+		}
 	}
-	return buf.Bytes(), nil
+	in.text = text.String()
+	return in, nil
 }

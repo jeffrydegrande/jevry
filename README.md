@@ -19,73 +19,66 @@ export OPENAI_API_KEY=...     # --provider openai
 
 ## Usage
 
-`jevry` reads input from the files that you name, or from stdin when you name no files.
+Each question type is one command. `jevry --help` and `jevry <command> --help` show more examples.
 
-Ask a yes/no question about the input. `jevry` prints the probability of "yes":
+| Command | Answer |
+| --- | --- |
+| `jevry noul <question>` | The probability of yes, from 0.00 to 1.00 |
+| `jevry choice <question> -o <option>...` | The name of one option |
+| `jevry score <question> -l <level>...` | A position on your scale, from 0 to the number of levels minus 1 |
+| `jevry box <target> <image>` | The edges of a box around the target |
+| `jevry raw` | The raw response to a full request body |
+
+The input is the content that the question is about. `jevry` reads it from the files that you name after the question, or from stdin when you name no files. PNG and JPEG inputs are images. All other input is text.
 
 ```sh
-echo "Win a free iPhone now!!!" | jevry --question "Is this spam?"
-0.94
-```
+echo "Win a free iPhone now!!!" | jevry noul "Is this spam?"
+0.95
 
-Add `--choice` to pick one option. Repeat it for each option. Use `name=description` to describe an option. `jevry` prints the chosen option:
-
-```sh
-echo "My payouts are failing" | jevry --question "Which team should handle this?" \
-  --choice "billing=Payments, invoicing, refunds" --choice technical --choice sales
+echo "My payouts are failing" | jevry choice "Which team should handle this?" \
+  -o "billing=Payments, invoicing, refunds" -o technical -o sales -o other
 billing
-```
 
-Add `--level` to rate the input on a scale. Repeat it for each level, lowest first. `jevry` prints the score, from 0 to the number of levels minus 1:
+echo "Export fails in Safari but works in Chrome" | jevry score "How severe is this issue?" \
+  -l "Appearance only" -l "A task fails, but another way works" -l "A task fails with no workaround"
+1.01
 
-```sh
-echo "My payouts are failing" | jevry --question "How frustrated is the customer?" \
-  --level Calm --level Frustrated --level "Very angry"
-1.04
-```
-
-PNG and JPEG inputs are images. Name them as files, or send one on stdin. All question types accept images:
-
-```sh
-jevry --question "Is there a person at the door?" door.jpg
-```
-
-Add `--box` to find something in an image. `--question` names the target. `jevry` prints the edges of the box as fractions of the image size, measured from the top left corner. Only TypeSafe has box questions:
-
-```sh
-jevry --question "the coffee mug" --box kitchen.jpg
+jevry box "the coffee mug" kitchen.jpg
 top=0.250 bottom=0.820 left=0.440 right=0.840
 ```
+
+The edges of a box are fractions of the image size, measured from the top left corner. Only TypeSafe has box questions.
 
 With TypeSafe, the state is the text when there are no images, and the image when the input is one image and no text. In all other cases the state is an object: the question can refer to `` `text` `` and `` `images[0]` ``.
 
 ### Providers
 
-Add `--provider openai` to send the question to OpenAI instead of TypeSafe. The output is the same:
+`--provider` (`-p`) selects the API. `--model` (`-m`) sets the model.
+
+| Provider | Default model | Notes |
+| --- | --- | --- |
+| `typesafe` (default) | `jev-latest` | |
+| `openai` | `gpt-6-luna` | No box questions |
+| `ollama` | none: set `--model` | No box questions. At most 26 options and 10 levels |
 
 ```sh
-echo "Win a free iPhone now!!!" | jevry --provider openai --question "Is this spam?"
+echo "Win a free iPhone now!!!" | jevry noul "Is this spam?" -p openai
+echo "Win a free iPhone now!!!" | jevry noul "Is this spam?" -p ollama -m gemma4:12b
 ```
 
-Add `--provider ollama` and `--model` to use a local model:
-
-```sh
-echo "Win a free iPhone now!!!" | jevry --provider ollama --model gemma4:12b --question "Is this spam?"
-```
-
-Ollama has no decision API. `jevry` tells the model to reply with one label, and calculates the probabilities from the log probabilities of the labels. General models are not trained for calibrated probabilities: most answers are near 0 or 1. The limits are 26 choices and 10 levels.
+Ollama has no decision API. `jevry` tells the model to reply with one label, and calculates the probabilities from the log probabilities of the labels. General models are not trained for calibrated probabilities: most answers are near 0 or 1.
 
 ### Raw requests
 
-Send a full request body as JSON for the provider. `jevry` prints the raw JSON response:
+`jevry raw` sends a full request body for the provider, as a JSON object. It prints the raw JSON response. Use it for requests that the other commands cannot build, for example more than one question in one request.
 
 ```sh
-jevry request.json
-jevry --provider openai request.json
-jevry --provider ollama --model gemma4:12b chat.json   # body for /api/chat
+jevry raw request.json
+jevry raw -p openai request.json
+jevry raw -p ollama -m gemma4:12b chat.json   # body for /api/chat
 ```
 
-`--model` sets the model. Without it, `jevry` keeps the `model` of the request, or uses `jev-latest` for TypeSafe and `gpt-6-luna` for OpenAI. Ollama has no default model.
+When the body has no `model` and you set no `--model`, `jevry` uses the default model of the provider.
 
 ## License
 

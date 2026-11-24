@@ -41,7 +41,7 @@ func call(t *testing.T, name, response, stdin string, args ...string) (string, m
 	}
 
 	var out bytes.Buffer
-	err := run(append([]string{"--provider", name}, args...), strings.NewReader(stdin), &out)
+	err := run(append(args, "--provider", name), strings.NewReader(stdin), &out)
 	return out.String(), body, header, err
 }
 
@@ -73,13 +73,13 @@ func TestTypesafe(t *testing.T) {
 		name, response, want, wantType string
 		args                           []string
 	}{
-		{"noul", `{"answers":{"q":{"type":"noul","noul":0.938}}}`, "0.94\n", "noul", nil},
-		{"choice", `{"answers":{"q":{"type":"choice","choice":"billing"}}}`, "billing\n", "choice", []string{"--choice", "billing=Payments", "--choice", "sales"}},
-		{"score", `{"answers":{"q":{"type":"score","score":1.04}}}`, "1.04\n", "score", []string{"--level", "Calm", "--level", "Angry"}},
+		{"noul", `{"answers":{"q":{"type":"noul","noul":0.938}}}`, "0.94\n", "noul", []string{"noul", "Why?"}},
+		{"choice", `{"answers":{"q":{"type":"choice","choice":"billing"}}}`, "billing\n", "choice", []string{"choice", "Why?", "--option", "billing=Payments", "-o", "sales"}},
+		{"score", `{"answers":{"q":{"type":"score","score":1.04}}}`, "1.04\n", "score", []string{"score", "Why?", "--level", "Calm", "-l", "Angry"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			out, body, header, err := call(t, "typesafe", tt.response, "the state", append([]string{"--question", "Why?"}, tt.args...)...)
+			out, body, header, err := call(t, "typesafe", tt.response, "the state", tt.args...)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -104,7 +104,7 @@ func TestTypesafe(t *testing.T) {
 
 func TestTypesafeBox(t *testing.T) {
 	response := `{"answers":{"q":{"type":"box","box":{"top":0.25,"bottom":0.82,"left":0.44,"right":0.84},"confidence":null}}}`
-	out, body, header, err := call(t, "typesafe", response, "", "--question", "the mug", "--box", imageFile(t))
+	out, body, header, err := call(t, "typesafe", response, "", "box", "the mug", imageFile(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestTypesafeBox(t *testing.T) {
 }
 
 func TestTypesafeTextAndImages(t *testing.T) {
-	_, body, _, err := call(t, "typesafe", `{"answers":{"q":{"type":"noul","noul":1}}}`, "some text", "--question", "Why?", "-", imageFile(t), imageFile(t))
+	_, body, _, err := call(t, "typesafe", `{"answers":{"q":{"type":"noul","noul":1}}}`, "some text", "noul", "Why?", "-", imageFile(t), imageFile(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestTypesafeTextAndImages(t *testing.T) {
 
 func TestRawMode(t *testing.T) {
 	request := `{"model":"jev-1.13.0","state":"s","questions":{"a":{"type":"box"}}}`
-	out, body, header, err := call(t, "typesafe", `{"raw":true}`, request)
+	out, body, header, err := call(t, "typesafe", `{"raw":true}`, request, "raw")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +150,7 @@ func TestRawMode(t *testing.T) {
 		t.Error("the images header is not set for a raw box question")
 	}
 
-	_, body, _, err = call(t, "ollama", `{}`, `{"model":"m","messages":[]}`, "--model", "other")
+	_, body, _, err = call(t, "ollama", `{}`, `{"model":"m","messages":[]}`, "raw", "--model", "other")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestRawMode(t *testing.T) {
 }
 
 func TestOpenAI(t *testing.T) {
-	out, body, _, err := call(t, "openai", `{"answers":[{"type":"predicate","name":"q","probability":0.5}]}`, "text", "--question", "Why?", "-", imageFile(t))
+	out, body, _, err := call(t, "openai", `{"answers":[{"type":"predicate","name":"q","probability":0.5}]}`, "text", "noul", "Why?", "-", imageFile(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +175,7 @@ func TestOpenAI(t *testing.T) {
 		t.Errorf("image_url = %q", url)
 	}
 
-	_, body, _, err = call(t, "openai", `{"answers":[{"type":"refusal","name":"q"}]}`, "text", "--question", "Why?")
+	_, body, _, err = call(t, "openai", `{"answers":[{"type":"refusal","name":"q"}]}`, "text", "noul", "Why?")
 	if err == nil || body["input"] != "text" {
 		t.Errorf("err = %v, input = %v: want a refusal error and a string input", err, body["input"])
 	}
@@ -215,13 +215,13 @@ func TestOllama(t *testing.T) {
 		name, response, want string
 		args                 []string
 	}{
-		{"noul", ollamaResponse(`{"yes":-0.511,"Yes":-2.303,"no":-1.609,"maybe":-2.303}`, "yes", "Yes", "no", "maybe"), "0.78\n", nil},
-		{"choice", ollamaResponse(`{"B":-0.511,"A":-1.609}`, "B", "A"), "sales\n", []string{"--choice", "billing=Payments", "--choice", "sales"}},
-		{"score", ollamaResponse(`{"2":-0.511,"1":-1.609," 0":-1.609}`, "2", "1", " 0"), "1.40\n", []string{"--level", "Calm", "--level", "Frustrated", "--level", "Angry"}},
+		{"noul", ollamaResponse(`{"yes":-0.511,"Yes":-2.303,"no":-1.609,"maybe":-2.303}`, "yes", "Yes", "no", "maybe"), "0.78\n", []string{"noul", "Why?"}},
+		{"choice", ollamaResponse(`{"B":-0.511,"A":-1.609}`, "B", "A"), "sales\n", []string{"choice", "Why?", "-o", "billing=Payments", "-o", "sales"}},
+		{"score", ollamaResponse(`{"2":-0.511,"1":-1.609," 0":-1.609}`, "2", "1", " 0"), "1.40\n", []string{"score", "Why?", "-l", "Calm", "-l", "Frustrated", "-l", "Angry"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			args := append([]string{"--model", "m", "--question", "Why?"}, tt.args...)
+			args := append(tt.args, "--model", "m")
 			out, body, header, err := call(t, "ollama", tt.response, "the state", args...)
 			if err != nil {
 				t.Fatal(err)
@@ -243,7 +243,7 @@ func TestOllama(t *testing.T) {
 }
 
 func TestOllamaImage(t *testing.T) {
-	_, body, _, err := call(t, "ollama", ollamaResponse(`{"yes":0}`, "yes"), "", "--model", "m", "--question", "Why?", imageFile(t))
+	_, body, _, err := call(t, "ollama", ollamaResponse(`{"yes":0}`, "yes"), "", "noul", "Why?", "--model", "m", imageFile(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,14 +257,16 @@ func TestErrors(t *testing.T) {
 		name, provider, response, stdin, want string
 		args                                  []string
 	}{
-		{"two types", "typesafe", "", "s", "only one of", []string{"--question", "q", "--choice", "a", "--level", "b"}},
-		{"type without question", "typesafe", "", "s", "need --question", []string{"--box"}},
-		{"box without image", "typesafe", "", "s", "needs a PNG or JPEG", []string{"--question", "q", "--box"}},
-		{"raw input is not JSON", "typesafe", "", "s", "not a JSON object", nil},
-		{"ollama without model", "ollama", "", "s", "set --model", []string{"--question", "q"}},
-		{"ollama reply is not a label", "ollama", `{"message":{"content":"It depends."}}`, "s", "not one of the labels", []string{"--model", "m", "--question", "q"}},
-		{"ollama without logprobs", "ollama", `{"message":{"content":"yes"}}`, "s", "no log probabilities", []string{"--model", "m", "--question", "q"}},
-		{"ollama too many choices", "ollama", "", "s", "at most 26", append([]string{"--model", "m", "--question", "q"}, strings.Fields(strings.Repeat("--choice x ", 27))...)},
+		{"no question", "typesafe", "", "s", "at least 1 arg", []string{"noul"}},
+		{"choice without option", "typesafe", "", "s", `"option" not set`, []string{"choice", "q"}},
+		{"score without level", "typesafe", "", "s", `"level" not set`, []string{"score", "q"}},
+		{"box without image", "typesafe", "", "s", "needs a PNG or JPEG", []string{"box", "q", "-"}},
+		{"raw input is not JSON", "typesafe", "", "s", "not a JSON object", []string{"raw"}},
+		{"unknown command", "typesafe", "", "s", "unknown command", []string{"nope"}},
+		{"ollama without model", "ollama", "", "s", "set --model", []string{"noul", "q"}},
+		{"ollama reply is not a label", "ollama", `{"message":{"content":"It depends."}}`, "s", "not one of the labels", []string{"noul", "q", "--model", "m"}},
+		{"ollama without logprobs", "ollama", `{"message":{"content":"yes"}}`, "s", "no log probabilities", []string{"noul", "q", "--model", "m"}},
+		{"ollama too many choices", "ollama", "", "s", "at most 26", append([]string{"choice", "q", "--model", "m"}, strings.Fields(strings.Repeat("-o x ", 27))...)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -275,13 +277,13 @@ func TestErrors(t *testing.T) {
 		})
 	}
 
-	err := run([]string{"--provider", "nope"}, strings.NewReader("s"), io.Discard)
+	err := run([]string{"noul", "q", "--provider", "nope"}, strings.NewReader("s"), io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "unknown provider") {
 		t.Errorf("err = %v, want an unknown provider error", err)
 	}
 
 	for _, name := range []string{"openai", "ollama"} {
-		_, _, _, err := call(t, name, "", "", "--model", "m", "--question", "q", "--box", imageFile(t))
+		_, _, _, err := call(t, name, "", "", "box", "q", "--model", "m", imageFile(t))
 		if err == nil || !strings.Contains(err.Error(), "no box questions") {
 			t.Errorf("%s: err = %v, want a box error", name, err)
 		}
@@ -296,7 +298,7 @@ func TestHTTPError(t *testing.T) {
 	t.Setenv("OLLAMA_HOST", strings.TrimPrefix(srv.URL, "http://"))
 
 	var out bytes.Buffer
-	err := run([]string{"--provider", "ollama", "--model", "m", "--question", "q"}, strings.NewReader("s"), &out)
+	err := run([]string{"noul", "q", "--provider", "ollama", "--model", "m"}, strings.NewReader("s"), &out)
 	if err == nil || !strings.Contains(err.Error(), "400") || !strings.Contains(out.String(), "bad") {
 		t.Errorf("err = %v, output = %q", err, out.String())
 	}
